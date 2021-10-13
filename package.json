@@ -1,0 +1,22 @@
+{
+  "name": "graph-as-to-rust",
+  "version": "0.0.1",
+  "description": "AssemblyScript compilation hook(s) to automtically generate The Graph compatible Rust code from types",
+  "main": "index.js",
+  "repository": "https://github.com/streamingfast/graph-as-to-rust",
+  "author": "StreamingFast Developers (dev@streamingfast.io)",
+  "license": "apache",
+  "dependencies": {
+    "@types/debug": "^4.1.7",
+    "@types/node": "^16.10.4",
+    "assemblyscript": "0.19.10",
+    "debug": "^4.3.2",
+    "pascal-case": "^3.1.2",
+    "rimraf": "^3.0.2",
+    "snake-case": "^3.0.4"
+  },
+  "devDependencies": {
+    "prettier": "^2.4.1",
+    "typescript": "^4.4.4"
+  }
+}
