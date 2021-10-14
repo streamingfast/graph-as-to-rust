@@ -10,6 +10,7 @@ import {
   Module,
   NamedTypeNode,
   NamespaceDeclaration,
+  ThrowStatement,
   TypeDeclaration,
   TypeNode,
 } from 'assemblyscript'
@@ -18,6 +19,7 @@ import * as fs from 'fs'
 import { snakeCase } from 'snake-case'
 import { pascalCase } from 'pascal-case'
 import debugFactory from 'debug'
+import { fileURLToPath } from 'url'
 
 const debug = debugFactory('graph:transformer')
 
@@ -55,17 +57,33 @@ export default class ToRustTransformer extends Transform {
     // FIXME: Hard-coded `near` literal in there
     const file = new File('./near.rs')
 
+    const aliasesByName = Object.fromEntries(typeAliases.map((alias) => [`Asc${alias.name}`, alias.aliasOf]))
+
+    const imports = this.computeImports(typeAliases, declarations)
+    const arrayWrappers = this.computeArrayTypeWrappers(declarations)
+    const enumWrappers = this.computeEnumTypeWrappers(declarations)
+
     try {
-      this.generateImports(file, this.computeImports(typeAliases, declarations))
+      this.generateImports(file, imports)
 
       typeAliases.forEach((typeAlias) => {
         this.generateTypeAlias(file, typeAlias)
       })
       file.writeLine('')
 
+      arrayWrappers.forEach((arrayType) => {
+        this.generateArrayWrapper(file, arrayType)
+      })
+      file.writeLine('')
+
+      enumWrappers.forEach((enumType) => {
+        this.generateEnumWrapper(file, enumType)
+      })
+      file.writeLine('')
+
       declarations.forEach((declaration) => {
         if (declaration instanceof ResolvedClass) {
-          this.generateClass(file, declaration as ResolvedClass)
+          this.generateClass(file, declaration as ResolvedClass, aliasesByName)
         } else if (declaration instanceof ResolvedEnum) {
           this.generateEnum(file, declaration as ResolvedEnum)
         } else {
@@ -73,6 +91,7 @@ export default class ToRustTransformer extends Transform {
             `Unhandled resolved declaration's type ${declaration.constructor.name} for ${declaration.name}`,
           )
         }
+        file.writeLine('')
       })
     } finally {
       file.close()
@@ -113,6 +132,36 @@ export default class ToRustTransformer extends Transform {
     return imports
   }
 
+  computeArrayTypeWrappers(declarations: ResolvedDeclaration[]): ArrayResolvedType[] {
+    const elements: Record<string, ArrayResolvedType> = {}
+    declarations.forEach((declaration) => {
+      if (declaration instanceof ResolvedClass) {
+        declaration.fields.forEach((field) => {
+          if (field.type instanceof ArrayResolvedType && !field.type.inner.isBuiltIn) {
+            elements[field.type.toRustWrappedType()] = field.type
+          }
+        })
+      }
+    })
+
+    return Object.values(elements)
+  }
+
+  computeEnumTypeWrappers(declarations: ResolvedDeclaration[]): EnumResolvedType[] {
+    const elements: Record<string, EnumResolvedType> = {}
+    declarations.forEach((declaration) => {
+      if (declaration instanceof ResolvedClass) {
+        declaration.fields.forEach((field) => {
+          if (field.type instanceof EnumResolvedType) {
+            elements[field.type.toRustWrappedType()] = field.type
+          }
+        })
+      }
+    })
+
+    return Object.values(elements)
+  }
+
   generateImports(file: File, imports: Imports) {
     Object.entries(imports.byModule).forEach(([module, values]) => {
       if (values.size === 0) {
@@ -129,27 +178,79 @@ export default class ToRustTransformer extends Transform {
     file.writeLine('')
   }
 
-  generateTypeAlias(file: File, alias: ResolvedTypeAlias) {
-    let rustType = alias.aliasOf.toRustType()
-
-    // FIXME: This is a bit hackish, alias should not include the leading `AscPtr`. This means
-    //        the representation in this project are incorrect and maybe being wrapped or not
-    //        in an AscPtr should be left to the caller. Not totally clear what is the best
-    //        path forward.
-    if (rustType.match(/^AscPtr\<.*\>$/)) {
-      rustType = rustType.replace('AscPtr<', '').replace(/>$/, '')
-    }
-
-    file.writeLine(`type Asc${alias.name} = ${rustType};`)
+  generateTypeAlias(file: File, typeAlias: ResolvedTypeAlias) {
+    file.writeLine(`pub(crate) type Asc${typeAlias.name} = ${typeAlias.aliasOf.toRustType()};`)
   }
 
-  generateClass(file: File, clazz: ResolvedClass) {
+  generateArrayWrapper(file: File, arrayType: ArrayResolvedType) {
+    const aliasName = arrayType.toRustType()
+
+    file.writeLine(`pub struct ${aliasName}(pub(crate) ${arrayType.toRustWrappedType()});`)
+    file.writeLine('')
+
+    file.writeLine(`impl AscType for ${aliasName} {`)
+    file.writeLine(`    fn to_asc_bytes(&self) -> Result<Vec<u8>, DeterministicHostError> {`)
+    file.writeLine(`        self.0.to_asc_bytes()`)
+    file.writeLine('    }')
+    file.writeLine('')
+    file.writeLine(
+      `    fn from_asc_bytes(asc_obj: &[u8], api_version: &Version) -> Result<Self, DeterministicHostError> {`,
+    )
+    file.writeLine(`        Ok(Self(Array::from_asc_bytes(asc_obj, api_version)?))`)
+    file.writeLine('    }')
+    file.writeLine('}')
+    file.writeLine('')
+
+    file.writeLine(`impl AscIndexId for ${aliasName} {`)
+    // FIXME: Hard-coded `near` literal in there
+    file.writeLine(
+      `    const INDEX_ASC_TYPE_ID: IndexForAscTypeId = IndexForAscTypeId::NearArray${arrayType.inner.name};`,
+    )
+    file.writeLine('}')
+    file.writeLine('')
+  }
+
+  generateEnumWrapper(file: File, enumType: EnumResolvedType) {
+    const aliasName = enumType.toRustType()
+
+    file.writeLine(`pub struct ${aliasName}(pub(crate) ${enumType.toRustWrappedType()});`)
+    file.writeLine('')
+
+    file.writeLine(`impl AscType for ${aliasName} {`)
+    file.writeLine(`    fn to_asc_bytes(&self) -> Result<Vec<u8>, DeterministicHostError> {`)
+    file.writeLine(`        self.0.to_asc_bytes()`)
+    file.writeLine('    }')
+    file.writeLine('')
+    file.writeLine(
+      `    fn from_asc_bytes(asc_obj: &[u8], api_version: &Version) -> Result<Self, DeterministicHostError> {`,
+    )
+    file.writeLine(`        Ok(Self(AscEnum::from_asc_bytes(asc_obj, api_version)?))`)
+    file.writeLine('    }')
+    file.writeLine('}')
+    file.writeLine('')
+
+    file.writeLine(`impl AscIndexId for ${aliasName} {`)
+    // FIXME: Hard-coded `near` literal in there
+    file.writeLine(`    const INDEX_ASC_TYPE_ID: IndexForAscTypeId = IndexForAscTypeId::Near${enumType.name}Enum;`)
+    file.writeLine('}')
+    file.writeLine('')
+  }
+
+  generateClass(file: File, clazz: ResolvedClass, aliases: Record<string, ResolvedType>) {
     file.writeLine('#[repr(C)]')
     file.writeLine('#[derive(AscType)]')
     file.writeLine(`pub(crate) struct Asc${clazz.name} {`)
 
     clazz.fields.forEach((field) => {
-      file.writeLine(`    pub ${snakeCase(field.name)}: ${field.type.toRustType()},`)
+      let rustType = field.type.toRustType()
+      if (field.type.isPointerType()) {
+        const alias = aliases[rustType]
+        if (alias == null || alias.isPointerType()) {
+          rustType = `AscPtr<${rustType}>`
+        }
+      }
+
+      file.writeLine(`    pub ${snakeCase(field.name)}: ${rustType},`)
     })
 
     file.writeLine('}')
@@ -394,6 +495,8 @@ abstract class ResolvedType {
 
   abstract addToImports(imports: Imports): void
 
+  abstract isPointerType(): boolean
+
   abstract toRustType(): string
 
   get isEnum(): boolean {
@@ -401,7 +504,7 @@ abstract class ResolvedType {
   }
 
   get isBuiltIn(): boolean {
-    return this instanceof EnumResolvedType
+    return this instanceof BuiltInResolvedType
   }
 }
 
@@ -413,13 +516,21 @@ class BuiltInResolvedType extends ResolvedType {
     }
   }
 
+  isPointerType(): boolean {
+    if (this.name === 'string') {
+      return true
+    }
+
+    return false
+  }
+
   toRustType(): string {
     if (this.name === 'bool' || this.name === 'u64' || this.name === 'u32') {
       return this.name
     }
 
     if (this.name === 'string') {
-      return 'AscPtr<AscString>'
+      return 'AscString'
     }
 
     throw new Error(`Unknown BuiltIn ${this.name}, modify codebase`)
@@ -437,13 +548,17 @@ class GraphCommonResolvedType extends ResolvedType {
     }
   }
 
+  isPointerType(): boolean {
+    return true
+  }
+
   toRustType(): string {
     if (this.name === 'Bytes') {
-      return 'AscPtr<Uint8Array>'
+      return 'Uint8Array'
     }
 
     if (this.name === 'BigInt') {
-      return 'AscPtr<AscBigInt>'
+      return 'AscBigInt'
     }
 
     throw new Error(`Unknown The Graph common type ${this.name}`)
@@ -462,9 +577,28 @@ class ArrayResolvedType extends ResolvedType {
     this.inner.addToImports(imports)
   }
 
-  toRustType(): string {
+  isPointerType(): boolean {
+    return true
+  }
+
+  toRustWrappedType(): string {
     // Hopefully, we never end with an infinite series of type ...
-    return `AscPtr<Array<${this.inner.toRustType()}>>`
+    let rustType = this.inner.toRustType()
+    if (this.inner.isPointerType()) {
+      rustType = `AscPtr<${rustType}>`
+    }
+
+    return `Array<${rustType}>`
+  }
+
+  toRustType(): string {
+    if (this.inner.isBuiltIn) {
+      return this.toRustWrappedType()
+    }
+
+    // FIXME: This is not totally right, if the inner is itself an array, than the `name` would be
+    //        Array and it's not what we want.
+    return `Asc${this.inner.name}Array`
   }
 }
 
@@ -474,8 +608,16 @@ class EnumResolvedType extends ResolvedType {
     imports.addModule('graph_runtime_wasm::asc_abi::class', 'AscEnum')
   }
 
+  isPointerType(): boolean {
+    return true
+  }
+
+  toRustWrappedType(): string {
+    return `AscEnum<Asc${this.name}>`
+  }
+
   toRustType(): string {
-    return `AscPtr<AscEnum<Asc${this.name}>>`
+    return `Asc${this.name}Enum`
   }
 }
 
@@ -484,8 +626,12 @@ class ObjectResolvedType extends ResolvedType {
     imports.addModule('graph::runtime', 'AscPtr')
   }
 
+  isPointerType(): boolean {
+    return true
+  }
+
   toRustType(): string {
-    return `AscPtr<Asc${this.name}>`
+    return `Asc${this.name}`
   }
 }
 
