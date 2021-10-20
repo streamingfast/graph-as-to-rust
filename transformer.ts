@@ -381,7 +381,7 @@ export default class ToRustTransformer extends Transform {
 
         const numericLiteral = valueDecl.initializer as IntegerLiteralExpression
         if (!i64_is_u32(numericLiteral.value)) {
-          throw new Error(`Enum value ${fieldName(node, valueDecl)} integer should be lowe than 32 bits`)
+          throw new Error(`Enum value ${fieldName(node, valueDecl)} integer should be lower than 32 bits`)
         }
 
         activeIndex = i64_low(numericLiteral.value)
@@ -525,7 +525,7 @@ class BuiltInResolvedType extends ResolvedType {
   }
 
   toRustType(): string {
-    if (this.name === 'bool' || this.name === 'u64' || this.name === 'u32') {
+    if (this.name === 'bool' || this.name === 'u64' || this.name === 'u32' || this.name === 'i64' || this.name === 'i32') {
       return this.name
     }
 
