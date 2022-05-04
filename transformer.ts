@@ -388,10 +388,6 @@ export default class ToRustTransformer extends Transform {
         inferred = false
       }
 
-      if (activeIndex !== index) {
-        throw new Error(`Enum value ${fieldName(node, valueDecl)} does not monotically increase starting at 0`)
-      }
-
       const element = { name: valueDecl.name.text, value: activeIndex }
       debug(`Enum value %s => %s (inferred? %s)`, element.name, element.value, inferred)
       values.push(element)
